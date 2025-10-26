@@ -188,7 +188,7 @@ export default function Home() {
                 <div className={`absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full ring-2 ring-white ${statusDot}`} />
                 <Image
                     src="/santa.png"
-                    alt="Дед Мороз"
+                    alt="Santa Claus"
                     width={112}
                     height={112}
                     className="rounded-full object-cover border-4 border-white shadow-md"
@@ -197,7 +197,7 @@ export default function Home() {
               </div>
 
               <div className="mt-4">
-                <div className="text-lg font-semibold">Дед Мороз</div>
+                <div className="text-lg font-semibold">Santa Claus</div>
                 <div className="text-xs text-gray-500">Северный полюс • Контакты</div>
               </div>
 

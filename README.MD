@@ -1,6 +1,6 @@
 ## 🎅 SantaPhone
 
-SantaPhone is a festive demo that lets you place a simulated phone call to Santa Claus (Дед Мороз) from your browser. The app establishes a WebRTC connection to the OpenAI Realtime API, streams your microphone audio to the model, and plays back Santa's voice in real time. It showcases how to combine Next.js, modern browser media APIs, and OpenAI's turn-detection features to build a natural-feeling conversational experience.【F:app/page.tsx†L1-L210】【F:app/api/sdp/route.ts†L1-L78】
+SantaPhone is a festive demo that lets you place a simulated phone call to Santa Claus from your browser. The app establishes a WebRTC connection to the OpenAI Realtime API, streams your microphone audio to the model, and plays back Santa's voice in real time. It showcases how to combine Next.js, modern browser media APIs, and OpenAI's turn-detection features to build a natural-feeling conversational experience.【F:app/page.tsx†L1-L210】【F:app/api/sdp/route.ts†L1-L78】
 
 ### How it works
 
@@ -29,7 +29,6 @@ Create a `.env.local` file in the project root and set the OpenAI credentials:
 ```bash
 OPENAI_API_KEY=sk-...
 # Optional: override the default realtime model
-# OPENAI_REALTIME_MODEL=gpt-4o-realtime-preview-2025-06-03
 ```
 
 ### Running the dev server
