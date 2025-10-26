@@ -5,11 +5,15 @@ import React, { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { santaSystemPrompt } from "@/lib/santaPrompt";
 
+type RealtimeConfig = {
+  voice: string;
+};
+
 type LogLine = { t: number; text: string };
 
-// дефолтные настройки
-const DEFAULT_MODEL = "gpt-realtime";
-const DEFAULT_VOICE = "ash";
+type WebAudioWindow = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
 
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -17,10 +21,42 @@ export default function Home() {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const audioTxRef = useRef<RTCRtpTransceiver | null>(null);
 
+  const [config, setConfig] = useState<RealtimeConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [isTalking, setIsTalking] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchConfig() {
+      try {
+        const resp = await fetch("/api/config");
+        if (!resp.ok) {
+          throw new Error(`bad status ${resp.status}`);
+        }
+        const json = (await resp.json()) as RealtimeConfig;
+        if (!cancelled) {
+          setConfig(json);
+          setConfigError(null);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!cancelled) {
+          setConfigError(message);
+          log("Ошибка конфигурации: " + message);
+        }
+      }
+    }
+
+    fetchConfig();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function log(text: string) {
     setLogs((prev) => [...prev, { t: Date.now(), text }]);
@@ -28,6 +64,11 @@ export default function Home() {
 
   async function startCall() {
     if (started) return;
+    if (!config) {
+      const message = configError || "Конфигурация ещё загружается";
+      log(message);
+      return;
+    }
 
     log("Инициализация WebRTC…");
 
@@ -72,7 +113,7 @@ export default function Home() {
         type: "session.update",
         session: {
           instructions: santaSystemPrompt,
-          voice: DEFAULT_VOICE,
+          voice: config.voice,
           modalities: ["audio", "text"],
           turn_detection: { type: "server_vad", create_response: false, interrupt_response: true },
         },
@@ -118,8 +159,6 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sdp: pc.localDescription?.sdp,
-        voice: DEFAULT_VOICE,
-        model: DEFAULT_MODEL, // зашили дефолтную модель
       }),
     });
 
@@ -140,7 +179,6 @@ export default function Home() {
   }
 
   async function attachMic() {
-    const pc = pcRef.current!;
     // микрофон по умолчанию — без выбора deviceId
     const constraints: MediaStreamConstraints = {
       audio: {
@@ -291,7 +329,13 @@ async function waitForIceGatheringComplete(pc: RTCPeerConnection) {
  * Для точного бардж-ина опираемся на серверную VAD Realtime.
  */
 function setupSimpleVAD(stream: MediaStream, onState: (talking: boolean) => void) {
-  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  const webAudioWindow = window as WebAudioWindow;
+  const AudioCtx = window.AudioContext || webAudioWindow.webkitAudioContext;
+  if (!AudioCtx) {
+    console.warn("Web Audio API is not supported in this browser");
+    return;
+  }
+
   const ctx = new AudioCtx();
   const src = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
