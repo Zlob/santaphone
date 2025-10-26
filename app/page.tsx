@@ -8,7 +8,6 @@ import { santaSystemPrompt } from "@/lib/santaPrompt";
 type LogLine = { t: number; text: string };
 
 // дефолтные настройки
-const DEFAULT_MODEL = "gpt-realtime";
 const DEFAULT_VOICE = "ash";
 
 export default function Home() {
@@ -118,8 +117,6 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sdp: pc.localDescription?.sdp,
-        voice: DEFAULT_VOICE,
-        model: DEFAULT_MODEL, // зашили дефолтную модель
       }),
     });
 
