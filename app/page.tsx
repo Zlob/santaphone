@@ -10,10 +10,12 @@ export default function Home() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
+  const audioTxRef = useRef<RTCRtpTransceiver | null>(null);
+
   const [started, setStarted] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [voice, setVoice] = useState("ash");
-  const [model, setModel] = useState("gpt-realtime-mini");
+  const [model, setModel] = useState("gpt-realtime");
   const [micDeviceId, setMicDeviceId] = useState<string | undefined>(undefined);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [isTalking, setIsTalking] = useState(false);
@@ -23,7 +25,6 @@ export default function Home() {
   }
 
   useEffect(() => {
-    // Получаем список микрофонов
     navigator.mediaDevices.enumerateDevices().then((devices) => {
       setMics(devices.filter((d) => d.kind === "audioinput"));
     });
@@ -39,44 +40,112 @@ export default function Home() {
     });
     pcRef.current = pc;
 
-    // DataChannel (на случай динамических команд/настроек)
-    const dc = pc.createDataChannel("santa-data");
-    dcRef.current = dc;
-    dc.onopen = () => {
-      // 1) системные инструкции (промпт)
-      dc.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions: santaSystemPrompt,     // <-- русский промпт
-          voice,                               // "alloy" и т.п.
-          modalities: ["audio","text"],
-          turn_detection: { type: "server_vad" }
-          // ВАЖНО: НЕ передаём здесь model
-        }
-      }));
+    // Диагностика соединения
+    pc.addEventListener("iceconnectionstatechange", () => log("ICE state: " + pc.iceConnectionState));
+    pc.addEventListener("connectionstatechange", () => log("PC state: " + pc.connectionState));
 
-      // 2) хотим, чтобы Дед Мороз сам поздоровался сразу:
-      dc.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          conversation: "auto",
-          modalities: ["audio","text"],
-          instructions: "Скажи короткое приветствие 10–15 секунд и спроси имя ребёнка.",
-        }
-      }));
-    };
-    dc.onmessage = (e) => log(`DC: ${e.data}`);
+    // На всякий случай снимаем mute и выставляем громкость
+    if (audioRef.current) {
+      audioRef.current.muted = false;
+      audioRef.current.volume = 1.0;
+    }
 
-    // Воспроизведение удалённого аудио (голос Деда Мороза)
+    // Рендер удалённого аудио: привязываем именно track
     pc.ontrack = (event) => {
-      const [stream] = event.streams;
-      if (audioRef.current) {
-        audioRef.current.srcObject = stream;
-        audioRef.current.play().catch(() => {});
+      const track = event.track;
+      log(`remote track: kind=${track.kind} id=${track.id} streams=${event.streams.map(s => s.id).join(",")}`);
+      if (track.kind === "audio") {
+        const ms = new MediaStream();
+        ms.addTrack(track);
+        if (audioRef.current) {
+          audioRef.current.srcObject = ms;
+          audioRef.current.muted = false;
+          audioRef.current.volume = 1.0;
+          audioRef.current.play().catch((e) => log("audio.play() blocked: " + String(e)));
+        }
       }
     };
 
-    // Микрофон
+    // DataChannel для команд/логов
+    const dc = pc.createDataChannel("santa-data");
+    dcRef.current = dc;
+
+    dc.onopen = () => {
+      // (1) Инструкции ДО подключения микрофона, автогенерация выключена
+      dc.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: santaSystemPrompt,
+          voice,
+          modalities: ["audio", "text"],
+          turn_detection: { type: "server_vad", create_response: false, interrupt_response: true },
+        },
+      }));
+
+      // (2) Однократное приветствие
+      dc.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: "Скажи голосом Санта Клауса 'Хо-хо-хо, Я Санта Клаус, а как зовут тебя?'",
+        },
+      }));
+
+      // (3) Включаем автоответы
+      dc.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          turn_detection: { type: "server_vad", create_response: true, interrupt_response: true },
+        },
+      }));
+
+      // (4) Подключаем микрофон (replaceTrack)
+      attachMic().catch((e) => log("Ошибка микрофона: " + String(e)));
+    };
+
+    dc.onmessage = (e) => log(`DC: ${e.data}`);
+
+    // === Медиасекции в SDP ДО createOffer ===
+    // Аудио-трансивер: sendrecv (позже подставим реальный трек)
+    audioTxRef.current = pc.addTransceiver("audio", { direction: "sendrecv" });
+
+    // Видео-трансивер: recvonly (требуется Realtime)
+    pc.addTransceiver("video", { direction: "recvonly" });
+
+    // Создаём оффер, ждём ICE
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceGatheringComplete(pc);
+
+    // Обмен SDP через наш сервер
+    const resp = await fetch("/api/sdp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sdp: pc.localDescription?.sdp,
+        voice,
+        model, // сервер может игнорировать и подставлять фиксированный id
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      log(`Ошибка SDP: ${JSON.stringify(err, null, 2)}`);
+      return;
+    }
+
+    const answerSdp = await resp.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+    setStarted(true);
+    log("Готово! Говори с Дедом Морозом 🎅");
+
+    // На всякий случай добиваем автоплей
+    audioRef.current?.play().catch((e) => log("autoplay retry: " + String(e)));
+  }
+
+  async function attachMic() {
+    const pc = pcRef.current!;
     const constraints: MediaStreamConstraints = {
       audio: {
         deviceId: micDeviceId ? { exact: micDeviceId } : undefined,
@@ -86,53 +155,18 @@ export default function Home() {
         autoGainControl: true,
       },
     };
-    const mic = await navigator.mediaDevices.getUserMedia(constraints);
-    mic.getTracks().forEach((t) => pc.addTrack(t, mic));
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const [track] = stream.getAudioTracks();
 
-    // Детектор речи (простой): меняем флаг isTalking
-    setupSimpleVAD(mic, (talking) => {
+    // Подставляем реальный трек в уже согласованный аудио-трансивер
+    await audioTxRef.current?.sender.replaceTrack(track);
+
+    // Простой VAD-индикатор (UX)
+    setupSimpleVAD(stream, (talking) => {
       setIsTalking(talking);
-      // При желании можно «мягко заглушать» удалённое аудио,
-      // когда пользователь заговорил, чтобы усилить эффект бардж-ина:
       const audio = audioRef.current;
-      if (audio) audio.volume = talking ? 0.3 : 1.0;
+      if (audio) audio.volume = talking ? 0.6 : 1.0; // помягче приглушаем
     });
-
-    // Получаем удалённые кандидаты ICE
-    pc.onicecandidate = () => {
-      // В режиме HTTP-SDP обмена обычно кандидаты встраиваются в SDP,
-      // так что отдельная пересылка не требуется — оставим пустым.
-    };
-
-    // Создаём оффер
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: false,
-    });
-    await pc.setLocalDescription(offer);
-
-    // Отправляем оффер на свой сервер — он обменяется с OpenAI и вернёт answer
-    const resp = await fetch("/api/sdp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sdp: offer.sdp,
-        voice,
-        model,
-      }),
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      log(`Ошибка SDP: ${err?.error || resp.statusText}`);
-      return;
-    }
-
-    const answerSdp = await resp.text();
-    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-    setStarted(true);
-    log("Готово! Говори с Дедом Морозом 🎅");
   }
 
   function hangup() {
@@ -145,85 +179,100 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen p-6 mx-auto max-w-2xl">
-      <h1 className="text-2xl font-bold mb-4">Дед Мороз — голосовой звонок (MVP)</h1>
+      <main className="min-h-screen p-6 mx-auto max-w-2xl">
+        <h1 className="text-2xl font-bold mb-4">Дед Мороз — голосовой звонок (MVP)</h1>
 
-      <div className="space-y-3 mb-6">
-        <div>
-          <label className="block text-sm font-medium mb-1">Микрофон</label>
-          <select
-            className="border rounded p-2 w-full"
-            value={micDeviceId || ""}
-            onChange={(e) => setMicDeviceId(e.target.value || undefined)}
-            disabled={started}
-          >
-            <option value="">По умолчанию</option>
-            {mics.map((d) => (
-              <option key={d.deviceId} value={d.deviceId}>{d.label || d.deviceId}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-3 mb-6">
           <div>
-            <label className="block text-sm font-medium mb-1">Голос</label>
+            <label className="block text-sm font-medium mb-1">Микрофон</label>
             <select
-              className="border rounded p-2 w-full"
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              disabled={started}
+                className="border rounded p-2 w-full"
+                value={micDeviceId || ""}
+                onChange={(e) => setMicDeviceId(e.target.value || undefined)}
+                disabled={started}
             >
-              <option value="ash">Ash</option>
-              <option value="verse">Verse</option>
-              <option value="cove">Cove</option>
-              {/* Добавь варианты голосов, доступных в твоём аккаунте */}
+              <option value="">По умолчанию</option>
+              {mics.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || d.deviceId}
+                  </option>
+              ))}
             </select>
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">Модель</label>
-            <input
-              className="border rounded p-2 w-full"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={started}
-            />
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium mb-1">Голос</label>
+              <select
+                  className="border rounded p-2 w-full"
+                  value={voice}
+                  onChange={(e) => setVoice(e.target.value)}
+                  disabled={started}
+              >
+                <option value="alloy">Alloy</option>
+                <option value="ash">Ash</option>
+                <option value="verse">Verse</option>
+                <option value="cove">Cove</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Модель (опционально)</label>
+              <input
+                  className="border rounded p-2 w-full"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={started}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                На сервере можно зафиксировать стабильный id, например: <code>gpt-4o-realtime-preview-2025-06-03</code>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {!started ? (
+                <button onClick={startCall} className="px-4 py-2 rounded bg-blue-600 text-white">
+                  Позвонить Деду Морозу
+                </button>
+            ) : (
+                <button onClick={hangup} className="px-4 py-2 rounded bg-gray-700 text-white">
+                  Завершить
+                </button>
+            )}
+            <div className={`text-sm px-2 py-1 rounded ${isTalking ? "bg-green-200" : "bg-gray-200"}`}>
+              {isTalking ? "Вы говорите…" : "Микрофон ждёт"}
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {!started ? (
-            <button
-              onClick={startCall}
-              className="px-4 py-2 rounded bg-blue-600 text-white"
-            >
-              Позвонить Деду Морозу
-            </button>
-          ) : (
-            <button
-              onClick={hangup}
-              className="px-4 py-2 rounded bg-gray-700 text-white"
-            >
-              Завершить
-            </button>
-          )}
-          <div className={`text-sm px-2 py-1 rounded ${isTalking ? "bg-green-200" : "bg-gray-200"}`}>
-            {isTalking ? "Вы говорите…" : "Микрофон ждёт"}
+        <audio ref={audioRef} autoPlay playsInline />
+
+        <div className="mt-6">
+          <h2 className="font-semibold mb-2">Лог</h2>
+          <div className="h-56 overflow-auto border rounded p-2 text-sm bg-white">
+            {logs.map((l, i) => (
+                <div key={i} className="whitespace-pre-wrap">
+                  {new Date(l.t).toLocaleTimeString()} — {l.text}
+                </div>
+            ))}
           </div>
         </div>
-      </div>
-
-      <audio ref={audioRef} autoPlay playsInline />
-
-      <div className="mt-6">
-        <h2 className="font-semibold mb-2">Лог</h2>
-        <div className="h-56 overflow-auto border rounded p-2 text-sm bg-white">
-          {logs.map((l, i) => (
-            <div key={i} className="whitespace-pre-wrap">{new Date(l.t).toLocaleTimeString()} — {l.text}</div>
-          ))}
-        </div>
-      </div>
-    </main>
+      </main>
   );
+}
+
+/** Дождаться завершения ICE-сборки, чтобы SDP включал кандидаты */
+async function waitForIceGatheringComplete(pc: RTCPeerConnection) {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise<void>((resolve) => {
+    function check() {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    }
+    pc.addEventListener("icegatheringstatechange", check);
+  });
 }
 
 /**
@@ -248,7 +297,7 @@ function setupSimpleVAD(stream: MediaStream, onState: (talking: boolean) => void
       sum += v * v;
     }
     const rms = Math.sqrt(sum / data.length);
-    const nowTalking = rms > 0.03; // простейший порог
+    const nowTalking = rms > 0.03; // простой порог
     if (nowTalking !== talking) {
       talking = nowTalking;
       onState(talking);
