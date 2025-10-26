@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { santaSystemPrompt } from "@/lib/santaPrompt";
 
 type LogLine = { t: number; text: string };
 
@@ -41,7 +42,29 @@ export default function Home() {
     // DataChannel (на случай динамических команд/настроек)
     const dc = pc.createDataChannel("santa-data");
     dcRef.current = dc;
-    dc.onopen = () => log("DataChannel открыт");
+    dc.onopen = () => {
+      // 1) системные инструкции (промпт)
+      dc.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: santaSystemPrompt,     // <-- русский промпт
+          voice,                               // "alloy" и т.п.
+          modalities: ["audio","text"],
+          turn_detection: { type: "server_vad" }
+          // ВАЖНО: НЕ передаём здесь model
+        }
+      }));
+
+      // 2) хотим, чтобы Дед Мороз сам поздоровался сразу:
+      dc.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          conversation: "auto",
+          modalities: ["audio","text"],
+          instructions: "Скажи короткое приветствие 10–15 секунд и спроси имя ребёнка.",
+        }
+      }));
+    };
     dc.onmessage = (e) => log(`DC: ${e.data}`);
 
     // Воспроизведение удалённого аудио (голос Деда Мороза)

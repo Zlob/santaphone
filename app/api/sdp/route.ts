@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { santaSystemPrompt } from "@/lib/santaPrompt";
+// import { santaSystemPrompt } from "@/lib/santaPrompt";
 
 export const runtime = "nodejs"; // важно, чтобы был серверный runtime
 
@@ -11,17 +11,17 @@ export async function POST(req: NextRequest) {
   const chosenVoice = voice || process.env.OPENAI_VOICE || "alloy";
 
   // Конфигурация сессии: системный промпт, голос, язык/ASR
-  const sessionConfig = {
-    model: chosenModel,
-    voice: chosenVoice,
-    // опции могут включать языковые подсказки, бардж-ин, VAD и т.п.
-    modalities: ["audio", "text"],
-    instructions: santaSystemPrompt,
-    input_audio_format: { type: "wav" }, // Realtime сам поймёт поток PCM/Opus
-    turn_detection: { type: "server_vad" }, // серверная VAD для бардж-ина
-    // Можно указать предпочтительный язык:
-    // speech_to_text: { language: "ru" },
-  };
+  // const sessionConfig = {
+  //   model: chosenModel,
+  //   voice: chosenVoice,
+  //   // опции могут включать языковые подсказки, бардж-ин, VAD и т.п.
+  //   modalities: ["audio", "text"],
+  //   instructions: santaSystemPrompt,
+  //   input_audio_format: { type: "wav" }, // Realtime сам поймёт поток PCM/Opus
+  //   turn_detection: { type: "server_vad" }, // серверная VAD для бардж-ина
+  //   // Можно указать предпочтительный язык:
+  //   // speech_to_text: { language: "ru" },
+  // };
 
   // HTTP SDP-обмен с OpenAI Realtime (WebRTC over HTTP)
   const resp = await fetch(
