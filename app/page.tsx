@@ -2,9 +2,14 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import { santaSystemPrompt } from "@/lib/santaPrompt";
 
 type LogLine = { t: number; text: string };
+
+// дефолтные настройки
+const DEFAULT_MODEL = "gpt-realtime";
+const DEFAULT_VOICE = "ash";
 
 export default function Home() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -14,21 +19,12 @@ export default function Home() {
 
   const [started, setStarted] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
-  const [voice, setVoice] = useState("ash");
-  const [model, setModel] = useState("gpt-realtime");
-  const [micDeviceId, setMicDeviceId] = useState<string | undefined>(undefined);
-  const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
   const [isTalking, setIsTalking] = useState(false);
 
   function log(text: string) {
     setLogs((prev) => [...prev, { t: Date.now(), text }]);
   }
-
-  useEffect(() => {
-    navigator.mediaDevices.enumerateDevices().then((devices) => {
-      setMics(devices.filter((d) => d.kind === "audioinput"));
-    });
-  }, []);
 
   async function startCall() {
     if (started) return;
@@ -50,10 +46,10 @@ export default function Home() {
       audioRef.current.volume = 1.0;
     }
 
-    // Рендер удалённого аудио: привязываем именно track
+    // Рендер удалённого аудио по входящему треку
     pc.ontrack = (event) => {
       const track = event.track;
-      log(`remote track: kind=${track.kind} id=${track.id} streams=${event.streams.map(s => s.id).join(",")}`);
+      log(`remote track: kind=${track.kind} id=${track.id} streams=${event.streams.map((s) => s.id).join(",")}`);
       if (track.kind === "audio") {
         const ms = new MediaStream();
         ms.addTrack(track);
@@ -71,12 +67,12 @@ export default function Home() {
     dcRef.current = dc;
 
     dc.onopen = () => {
-      // (1) Инструкции ДО подключения микрофона, автогенерация выключена
+      // (1) Инструкции ДО подключения микрофона, сначала без автоответа
       dc.send(JSON.stringify({
         type: "session.update",
         session: {
           instructions: santaSystemPrompt,
-          voice,
+          voice: DEFAULT_VOICE,
           modalities: ["audio", "text"],
           turn_detection: { type: "server_vad", create_response: false, interrupt_response: true },
         },
@@ -91,7 +87,7 @@ export default function Home() {
         },
       }));
 
-      // (3) Включаем автоответы
+      // (3) Включаем автоответы для последующей речи пользователя
       dc.send(JSON.stringify({
         type: "session.update",
         session: {
@@ -106,10 +102,9 @@ export default function Home() {
     dc.onmessage = (e) => log(`DC: ${e.data}`);
 
     // === Медиасекции в SDP ДО createOffer ===
-    // Аудио-трансивер: sendrecv (позже подставим реальный трек)
+    // Аудио-трансивер: sendrecv (реальный трек подставим позже)
     audioTxRef.current = pc.addTransceiver("audio", { direction: "sendrecv" });
-
-    // Видео-трансивер: recvonly (требуется Realtime)
+    // Видео-трансивер: recvonly — требуется Realtime
     pc.addTransceiver("video", { direction: "recvonly" });
 
     // Создаём оффер, ждём ICE
@@ -123,8 +118,8 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sdp: pc.localDescription?.sdp,
-        voice,
-        model, // сервер может игнорировать и подставлять фиксированный id
+        voice: DEFAULT_VOICE,
+        model: DEFAULT_MODEL, // зашили дефолтную модель
       }),
     });
 
@@ -146,9 +141,9 @@ export default function Home() {
 
   async function attachMic() {
     const pc = pcRef.current!;
+    // микрофон по умолчанию — без выбора deviceId
     const constraints: MediaStreamConstraints = {
       audio: {
-        deviceId: micDeviceId ? { exact: micDeviceId } : undefined,
         channelCount: 1,
         noiseSuppression: true,
         echoCancellation: true,
@@ -165,7 +160,7 @@ export default function Home() {
     setupSimpleVAD(stream, (talking) => {
       setIsTalking(talking);
       const audio = audioRef.current;
-      if (audio) audio.volume = talking ? 0.6 : 1.0; // помягче приглушаем
+      if (audio) audio.volume = talking ? 0.6 : 1.0; // мягко приглушаем ассистента, когда говорим
     });
   }
 
@@ -178,85 +173,101 @@ export default function Home() {
     log("Звонок завершён.");
   }
 
+  // UI helpers
+  const statusText = started ? (isTalking ? "Вы говорите…" : "Вызов активен") : "Готов к звонку";
+  const statusDot = started ? (isTalking ? "bg-green-500" : "bg-emerald-500") : "bg-gray-400";
+
   return (
-      <main className="min-h-screen p-6 mx-auto max-w-2xl">
-        <h1 className="text-2xl font-bold mb-4">Дед Мороз — голосовой звонок (MVP)</h1>
+      <main className="min-h-screen bg-gradient-to-b from-sky-50 to-white flex items-center justify-center p-6">
+        <div className="w-[360px]">
+          {/* "Трубка" */}
+          <div className="rounded-[2rem] shadow-xl bg-white border border-gray-100 overflow-hidden">
+            {/* Шапка контакта */}
+            <div className="p-6 flex flex-col items-center text-center">
+              <div className="relative">
+                <div className={`absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full ring-2 ring-white ${statusDot}`} />
+                <Image
+                    src="/santa.png"
+                    alt="Дед Мороз"
+                    width={112}
+                    height={112}
+                    className="rounded-full object-cover border-4 border-white shadow-md"
+                    priority
+                />
+              </div>
 
-        <div className="space-y-3 mb-6">
-          <div>
-            <label className="block text-sm font-medium mb-1">Микрофон</label>
-            <select
-                className="border rounded p-2 w-full"
-                value={micDeviceId || ""}
-                onChange={(e) => setMicDeviceId(e.target.value || undefined)}
-                disabled={started}
+              <div className="mt-4">
+                <div className="text-lg font-semibold">Дед Мороз</div>
+                <div className="text-xs text-gray-500">Северный полюс • Контакты</div>
+              </div>
+
+              <div className="mt-4 flex items-center gap-2 text-sm">
+                <span className={`inline-block w-2 h-2 rounded-full ${statusDot}`} />
+                <span className="text-gray-600">{statusText}</span>
+              </div>
+            </div>
+
+            {/* Панель действий как в телефоне */}
+            <div className="px-6 pb-2">
+              <div className="flex items-center justify-center gap-6 py-5">
+                {!started ? (
+                    <button
+                        onClick={startCall}
+                        className="h-14 w-14 rounded-full bg-green-500 text-white flex items-center justify-center shadow-md active:scale-95 transition"
+                        aria-label="Позвонить"
+                        title="Позвонить"
+                    >
+                      {/* handset icon */}
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 011 1V21a1 1 0 01-1 1C10.85 22 2 13.15 2 2a1 1 0 011-1h3.49a1 1 0 011 1c0 1.24.2 2.45.57 3.57a1 1 0 01-.24 1.02l-2.2 2.2z" />
+                      </svg>
+                    </button>
+                ) : (
+                    <button
+                        onClick={hangup}
+                        className="h-14 w-14 rounded-full bg-red-500 text-white flex items-center justify-center shadow-md active:scale-95 transition"
+                        aria-label="Завершить"
+                        title="Завершить"
+                    >
+                      {/* handset down icon */}
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7 rotate-135" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M21 16a1 1 0 01-1 1c-1.24 0-2.45-.2-3.57-.57a1 1 0 00-1.02.24l-2.2 2.2a15.05 15.05 0 01-6.59-6.59l2.2-2.2a1 1 0 00.24-1.02A12.58 12.58 0 008 4a1 1 0 00-1-1H4a1 1 0 00-1 1C3 13.15 11.85 22 22 22a1 1 0 001-1v-3.49a1 1 0 00-1-1z" />
+                      </svg>
+                    </button>
+                )}
+              </div>
+
+              {/* Индикатор речи */}
+              <div className="pb-5 flex items-center justify-center gap-2 text-xs text-gray-500">
+                <span className={`inline-flex h-2.5 w-2.5 rounded-full ${isTalking ? "bg-green-500 animate-pulse" : "bg-gray-300"}`} />
+                <span>{isTalking ? "Микрофон активен" : "Микрофон ждёт"}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Вспомогательная кнопка лога */}
+          <div className="flex items-center justify-between mt-3">
+            <button
+                className="text-xs text-gray-500 underline underline-offset-4"
+                onClick={() => setShowLogs((s) => !s)}
             >
-              <option value="">По умолчанию</option>
-              {mics.map((d) => (
-                  <option key={d.deviceId} value={d.deviceId}>
-                    {d.label || d.deviceId}
-                  </option>
-              ))}
-            </select>
+              {showLogs ? "Скрыть лог" : "Показать лог"}
+            </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Голос</label>
-              <select
-                  className="border rounded p-2 w-full"
-                  value={voice}
-                  onChange={(e) => setVoice(e.target.value)}
-                  disabled={started}
-              >
-                <option value="alloy">Alloy</option>
-                <option value="ash">Ash</option>
-                <option value="verse">Verse</option>
-                <option value="cove">Cove</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Модель (опционально)</label>
-              <input
-                  className="border rounded p-2 w-full"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={started}
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                На сервере можно зафиксировать стабильный id, например: <code>gpt-4o-realtime-preview-2025-06-03</code>
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {!started ? (
-                <button onClick={startCall} className="px-4 py-2 rounded bg-blue-600 text-white">
-                  Позвонить Деду Морозу
-                </button>
-            ) : (
-                <button onClick={hangup} className="px-4 py-2 rounded bg-gray-700 text-white">
-                  Завершить
-                </button>
-            )}
-            <div className={`text-sm px-2 py-1 rounded ${isTalking ? "bg-green-200" : "bg-gray-200"}`}>
-              {isTalking ? "Вы говорите…" : "Микрофон ждёт"}
-            </div>
-          </div>
+          {showLogs && (
+              <div className="mt-2 h-48 overflow-auto border rounded-xl p-2 text-xs bg-white/80 shadow-inner">
+                {logs.map((l, i) => (
+                    <div key={i} className="whitespace-pre-wrap">
+                      {new Date(l.t).toLocaleTimeString()} — {l.text}
+                    </div>
+                ))}
+              </div>
+          )}
         </div>
 
+        {/* Аудио-элемент */}
         <audio ref={audioRef} autoPlay playsInline />
-
-        <div className="mt-6">
-          <h2 className="font-semibold mb-2">Лог</h2>
-          <div className="h-56 overflow-auto border rounded p-2 text-sm bg-white">
-            {logs.map((l, i) => (
-                <div key={i} className="whitespace-pre-wrap">
-                  {new Date(l.t).toLocaleTimeString()} — {l.text}
-                </div>
-            ))}
-          </div>
-        </div>
       </main>
   );
 }
@@ -297,7 +308,7 @@ function setupSimpleVAD(stream: MediaStream, onState: (talking: boolean) => void
       sum += v * v;
     }
     const rms = Math.sqrt(sum / data.length);
-    const nowTalking = rms > 0.03; // простой порог
+    const nowTalking = rms > 0.03;
     if (nowTalking !== talking) {
       talking = nowTalking;
       onState(talking);
